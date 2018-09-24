@@ -31,6 +31,7 @@ pub mod symbol_table;
 pub mod dynamic;
 pub mod hash;
 
+use core::cell::RefCell;
 use header::Header;
 use sections::{SectionHeader, SectionIter};
 use program::{ProgramHeader, ProgramIter};
@@ -43,6 +44,10 @@ pub type P64 = u64;
 pub struct ElfFile<'a> {
     pub input: &'a [u8],
     pub header: Header<'a>,
+    // Frequently-used items that are cached to accelerate
+    pub strtab: RefCell<Option<SectionHeader<'a>>>,
+    pub dynstr: RefCell<Option<SectionHeader<'a>>>,
+    pub shstr: RefCell<Option<&'a [u8]>>,
 }
 
 impl<'a> ElfFile<'a> {
@@ -51,6 +56,9 @@ impl<'a> ElfFile<'a> {
         Ok(ElfFile {
             input: input,
             header: header,
+            strtab: RefCell::new(None),
+            dynstr: RefCell::new(None),
+            shstr: RefCell::new(None),
         })
     }
 
@@ -81,7 +89,11 @@ impl<'a> ElfFile<'a> {
     }
 
     pub fn get_string(&self, index: u32) -> Result<&'a str, &'static str> {
-        let header = try!(self.find_section_by_name(".strtab").ok_or("no .strtab section"));
+        if self.strtab.borrow().is_none() {
+            let _ = self.strtab.replace(Some(self.find_section_by_name(".strtab")
+                                        .ok_or("no .strtab section")?));
+        }
+        let header = self.strtab.borrow().unwrap();
         if try!(header.get_type()) != sections::ShType::StrTab {
             return Err("expected .strtab to be StrTab");
         }
@@ -89,7 +101,11 @@ impl<'a> ElfFile<'a> {
     }
 
     pub fn get_dyn_string(&self, index: u32) -> Result<&'a str, &'static str> {
-        let header = try!(self.find_section_by_name(".dynstr").ok_or("no .dynstr section"));
+        if self.dynstr.borrow().is_none() {
+            let _ = self.dynstr.replace(Some(self.find_section_by_name(".dynstr")
+                                        .ok_or("no .dynstr section")?));
+        }
+        let header = self.dynstr.borrow().unwrap();
         Ok(read_str(&header.raw_data(self)[(index as usize)..]))
     }
 
@@ -108,9 +124,12 @@ impl<'a> ElfFile<'a> {
     }
 
     fn get_shstr_table(&self) -> Result<&'a [u8], &'static str> {
-        // TODO cache this?
-        let header = self.section_header(self.header.pt2.sh_str_index());
-        header.map(|h| &self.input[(h.offset() as usize)..])
+        if self.shstr.borrow().is_none() {
+            let header = self.section_header(self.header.pt2.sh_str_index())?;
+            let shstr = &self.input[(header.offset() as usize)..];
+            let _ = self.shstr.replace(Some(shstr));
+        }
+        Ok(self.shstr.borrow().unwrap())
     }
 }
 
